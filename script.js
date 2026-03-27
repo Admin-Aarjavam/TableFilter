@@ -1,4 +1,4 @@
-(function () {
+(function () { 
     if (window.__SG_FILTER_LOADED__) return;
     window.__SG_FILTER_LOADED__ = true;
     // ======= DYNAMIC STYLES =======
