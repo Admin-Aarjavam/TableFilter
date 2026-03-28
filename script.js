@@ -6,10 +6,9 @@
         const style = document.createElement("style");
         style.id = "sg-filter-style";
         style.textContent = `
-          table{border-collapse:collapse;width:100%;margin-bottom:20px;}
-          th,td{padding:8px;border:1px solid #ddd;font-family:Arial,sans-serif;}
+          
           td:focus{outline:2px solid #4a89ff;background:#eef5ff;}
-          .filter-icon{font-size:12px;color:#fff;cursor:pointer;margin-left:4px;display:none;}
+          
           .gs-filter-active{background:#bcd7ff !important;}
           .gs-filter-popup{
           position:absolute;background:#fff;border-radius:6px;
