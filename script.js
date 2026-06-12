@@ -50,6 +50,28 @@
             outline-offset: -2px;
           }
 
+          /* ===== EDIT MODE ===== */
+          td.sg-editing {
+            padding: 0 !important;
+            background: #fff !important;
+            outline: 2px solid #4a89ff !important;
+            outline-offset: -2px;
+          }
+          td.sg-editing input.sg-edit-input,
+          td.sg-editing select.sg-edit-input {
+            width: 100%;
+            height: 100%;
+            min-height: 28px;
+            border: none;
+            outline: none;
+            padding: 6px 8px;
+            font-size: inherit;
+            font-family: inherit;
+            background: #fff;
+            color: #222;
+            box-sizing: border-box;
+          }
+
           /* ===== MOBILE RESPONSIVE ===== */
           @media (max-height: 468px) {
           h2 {font-size: 16px;margin: 10px 0;}
@@ -134,8 +156,8 @@
     }
 
     // ======= SELECTION STATE =======
-    let anchorCell = null;  // { table, rowIndex, colIndex }
-    let activeCell = null;  // { table, rowIndex, colIndex }
+    let anchorCell = null;
+    let activeCell = null;
 
     function sg_visibleRows(table) {
         const headersCount = table.querySelectorAll("th").length;
@@ -184,6 +206,97 @@
         sg_paintSelection(table);
     }
 
+    // ======= EDIT MODE =======
+    // sg-fillable columns: store their options list if they are dropdowns
+    // We detect dropdown columns by a data attribute on <th>:
+    //   data-sg-options="Option A,Option B,Option C"
+    // If not set, the cell is treated as a plain text/number input.
+    // data-sg-type="number" on <th> makes it a number input.
+
+    function sg_getColMeta(table, colIndex) {
+        const ths = table.querySelectorAll("th");
+        const th  = ths[colIndex];
+        if (!th) return { type: "text", options: null };
+        const options = th.dataset.sgOptions
+            ? th.dataset.sgOptions.split(",").map(s => s.trim())
+            : null;
+        const type = th.dataset.sgType || "text";
+        return { type, options };
+    }
+
+    function sg_commitEdit(td, newValue) {
+        // Remove the edit widget, restore display text
+        td.classList.remove("sg-editing");
+        td.innerHTML = "";
+        td.textContent = newValue;
+        // Fire a custom event so host pages can react (e.g. save to sheet)
+        td.dispatchEvent(new CustomEvent("sg-cell-edited", {
+            bubbles: true,
+            detail: { td, value: newValue }
+        }));
+    }
+
+    function sg_enterEditMode(td, table, rowIndex, colIndex) {
+        // Only enter edit mode if column is marked sg-fillable
+        const headers = table.querySelectorAll("th");
+        if (!headers[colIndex]?.classList.contains("sg-fillable")) return;
+
+        // Already editing this cell? do nothing
+        if (td.classList.contains("sg-editing")) return;
+
+        const meta        = sg_getColMeta(table, colIndex);
+        const currentVal  = td.textContent.trim();
+
+        td.classList.add("sg-editing");
+        td.innerHTML = "";
+
+        let widget;
+        if (meta.options) {
+            widget = document.createElement("select");
+            widget.className = "sg-edit-input";
+            meta.options.forEach(opt => {
+                const o = document.createElement("option");
+                o.value = o.textContent = opt;
+                if (opt === currentVal) o.selected = true;
+                widget.appendChild(o);
+            });
+            // For dropdowns: commit on change, or on blur
+            widget.addEventListener("change", () => {
+                sg_commitEdit(td, widget.value);
+            });
+        } else {
+            widget = document.createElement("input");
+            widget.className = "sg-edit-input";
+            widget.type  = meta.type === "number" ? "number" : "text";
+            widget.value = currentVal;
+            widget.addEventListener("keydown", e => {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    sg_commitEdit(td, widget.value);
+                }
+                if (e.key === "Escape") {
+                    // restore original
+                    td.classList.remove("sg-editing");
+                    td.innerHTML = "";
+                    td.textContent = currentVal;
+                }
+            });
+        }
+
+        widget.addEventListener("blur", () => {
+            if (td.classList.contains("sg-editing")) {
+                const val = meta.options ? widget.value : widget.value;
+                sg_commitEdit(td, val);
+            }
+        });
+
+        td.appendChild(widget);
+        widget.focus();
+        if (!meta.options && widget.setSelectionRange) {
+            widget.setSelectionRange(widget.value.length, widget.value.length);
+        }
+    }
+
     // ======= ATTACH MOUSE EVENTS TO CELLS =======
     function sg_attachCellEvents(table) {
         const rows = sg_visibleRows(table);
@@ -193,7 +306,10 @@
                 td.dataset.sgBound = "1";
                 td.setAttribute("tabindex", "0");
 
+                // Single click: select
                 td.addEventListener("mousedown", e => {
+                    // Don't interfere if user clicked inside an active edit widget
+                    if (td.classList.contains("sg-editing")) return;
                     if (popup.contains(e.target)) return;
 
                     const visRows = sg_visibleRows(table);
@@ -207,6 +323,15 @@
                     }
 
                     td.focus({ preventScroll: false });
+                    e.preventDefault();
+                });
+
+                // Double click: enter edit mode
+                td.addEventListener("dblclick", e => {
+                    const visRows = sg_visibleRows(table);
+                    const visRIdx = visRows.indexOf(row);
+                    if (visRIdx === -1) return;
+                    sg_enterEditMode(td, table, visRIdx, cIdx);
                     e.preventDefault();
                 });
             });
@@ -406,20 +531,34 @@
         return parseFloat(value.toString().replace(/[^0-9.\-]/g, ""));
     }
 
+    // FIX: getCellValue reads plain textContent only (no inputs/selects in cells anymore)
     function sg_getCellValue(cell) {
+        if (!cell) return "";
+        // If cell is in edit mode, read the live widget value
+        const editWidget = cell.querySelector(".sg-edit-input");
+        if (editWidget) {
+            return editWidget.tagName === "SELECT"
+                ? editWidget.value
+                : editWidget.value.trim();
+        }
         const numericSpan = cell.querySelector(".numeric-value");
         if (numericSpan) return numericSpan.dataset.raw.trim();
-        const input = cell.querySelector("input");
-        if (input) return sg_toProperCase(input.value.trim());
-        return sg_toProperCase(cell.innerText.trim());
+        return sg_toProperCase(cell.textContent.trim());
     }
 
     function sg_setCellValue(cell, value) {
+        if (!cell) return;
         const numericSpan = cell.querySelector(".numeric-value");
         if (numericSpan) { numericSpan.dataset.raw = value; numericSpan.textContent = value; return; }
-        const input = cell.querySelector("input");
-        if (input) { input.value = value; return; }
-        cell.innerText = value;
+        // If in edit mode, update the widget and commit
+        const editWidget = cell.querySelector(".sg-edit-input");
+        if (editWidget) {
+            editWidget.value = value;
+            sg_commitEdit(cell, value);
+            return;
+        }
+        // Plain cell
+        cell.textContent = value;
     }
 
     // ======= SEARCH =======
@@ -545,6 +684,10 @@
         const table = anchorCell.table;
         if (!table || !table.classList.contains("data-table")) return;
 
+        // If a cell is being edited, let the edit widget handle keyboard normally
+        const editingCell = table.querySelector("td.sg-editing");
+        if (editingCell) return;
+
         const rows   = sg_visibleRows(table);
         const maxRow = rows.length - 1;
         const maxCol = (rows[0]?.children.length ?? 1) - 1;
@@ -554,7 +697,6 @@
             e.preventDefault();
             const stack = sg_getUndoStack(table);
             if (!stack.length) return;
-
             const snapshot = stack.pop();
             snapshot.forEach(({ r, c, value }) => {
                 const td = rows[r]?.children[c];
@@ -563,28 +705,23 @@
             return;
         }
 
-        // ---- Ctrl+D : fill down (only if table has sg-fillable class) ----
+        // ---- Ctrl+D : fill down ----
         if (e.ctrlKey && e.key === "d") {
             e.preventDefault();
 
             const headers = [...table.querySelectorAll("th")];
-
             const rMin = Math.min(anchorCell.rowIndex, activeCell.rowIndex);
             const rMax = Math.max(anchorCell.rowIndex, activeCell.rowIndex);
             const cMin = Math.min(anchorCell.colIndex, activeCell.colIndex);
             const cMax = Math.max(anchorCell.colIndex, activeCell.colIndex);
 
-            // Only snapshot + fill columns that are sg-fillable
             const fillableCols = [];
             for (let c = cMin; c <= cMax; c++) {
-                if (headers[c]?.classList.contains("sg-fillable")) {
-                    fillableCols.push(c);
-                }
+                if (headers[c]?.classList.contains("sg-fillable")) fillableCols.push(c);
             }
+            if (!fillableCols.length) return;
 
-            if (!fillableCols.length) return; // nothing to fill
-
-            // Save snapshot of only the fillable columns (rows rMin+1 to rMax)
+            // Snapshot before fill
             const snapshot = [];
             for (let c of fillableCols) {
                 for (let r = rMin + 1; r <= rMax; r++) {
@@ -594,13 +731,32 @@
             }
             sg_getUndoStack(table).push(snapshot);
 
-            // Fill down only fillable columns
+            // Fill: copy plain text value from source cell
             for (let c of fillableCols) {
-                const sourceValue = sg_getCellValue(rows[rMin].children[c]);
+                // FIX: always read the committed text value, never innerHTML
+                const sourceTd    = rows[rMin]?.children[c];
+                const editWidget  = sourceTd?.querySelector(".sg-edit-input");
+                const sourceValue = editWidget? editWidget.value : (sourceTd?.textContent.trim() ?? "");
                 for (let r = rMin + 1; r <= rMax; r++) {
-                    sg_setCellValue(rows[r].children[c], sourceValue);
+                    const td = rows[r]?.children[c];
+                    if (td) {
+                        // If this is a dropdown column, validate value exists in options
+                        const meta = sg_getColMeta(table, c);
+                        const safeValue = meta.options
+                            ? (meta.options.includes(sourceValue) ? sourceValue : meta.options[0])
+                            : sourceValue;
+                        sg_setCellValue(td, safeValue);
+                    }
                 }
             }
+            return;
+        }
+
+        // ---- F2 : enter edit mode on anchor cell ----
+        if (e.key === "F2") {
+            e.preventDefault();
+            const td = rows[anchorCell.rowIndex]?.children[anchorCell.colIndex];
+            if (td) sg_enterEditMode(td, table, anchorCell.rowIndex, anchorCell.colIndex);
             return;
         }
 
